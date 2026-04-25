@@ -23,50 +23,51 @@ import shutil
 
 # Add the submodule to the Python path
 SUBMODULE_PATH = os.path.join(os.getcwd(), "LeanOfThought-Official")
-MATHLIB_PATH = os.path.join(SUBMODULE_PATH, "mathlib4")
+MINIMAL_WORKSPACE = "/tmp/minimal_lean"
 ORIGINAL_CWD = os.getcwd()
 
 if os.path.exists(SUBMODULE_PATH):
     sys.path.append(SUBMODULE_PATH)
     print(f"Added {SUBMODULE_PATH} to sys.path")
-else:
-    print(f"Warning: {SUBMODULE_PATH} not found.")
 
-def setup_lean():
-    """Robust but minimal setup for Lean4 environment in Colab."""
-    print("Checking Lean4 environment...")
+def setup_minimal_lean():
+    """Ensures a minimal Lean workspace is ready."""
+    print(f"Setting up minimal Lean workspace at {MINIMAL_WORKSPACE}...")
+    os.makedirs(MINIMAL_WORKSPACE, exist_ok=True)
+    
+    with open(os.path.join(MINIMAL_WORKSPACE, "lakefile.lean"), "w") as f:
+        f.write('import Lake\nopen Lake DSL\npackage minimal where\n@[default_target]\nlean_lib Minimal\n')
+    
+    with open(os.path.join(MINIMAL_WORKSPACE, "lean-toolchain"), "w") as f:
+        f.write('leanprover/lean4:stable\n')
+        
+    with open(os.path.join(MINIMAL_WORKSPACE, "Minimal.lean"), "w") as f:
+        f.write('-- Minimal Lean File\n')
+    
+    # Add elan to PATH
     elan_bin = os.path.expanduser("~/.elan/bin")
     if elan_bin not in os.environ["PATH"]:
         os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
     
-    if not shutil.which("lake"):
-        print("Installing elan...")
-        subprocess.run("curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y", shell=True, check=True)
-    
-    # Ensure the correct toolchain is linked
-    subprocess.run(["elan", "default", "stable"], check=True)
-    
-    if os.path.exists(MATHLIB_PATH):
-        print("Ensuring REPL is built in mathlib4...")
-        # We build REPL because it's the bridge between Python and Lean
-        subprocess.run(["lake", "build", "repl"], cwd=MATHLIB_PATH, check=True)
+    try:
+        subprocess.run(["lake", "build"], cwd=MINIMAL_WORKSPACE, check=True, capture_output=True)
+        print("Minimal Lean workspace ready.")
         
-        # Link lake to where the verifier expects it
-        os.makedirs(elan_bin, exist_ok=True)
+        # Link lake for verifier
         lake_path = shutil.which("lake")
-        target = os.path.join(elan_bin, "lake")
-        if lake_path and lake_path != target and not os.path.exists(target):
-            try:
-                os.symlink(lake_path, target)
-            except FileExistsError:
-                pass
-    return True
+        expected_path = os.path.expanduser("~/.elan/bin/lake")
+        if lake_path and lake_path != expected_path and not os.path.exists(expected_path):
+            os.makedirs(os.path.dirname(expected_path), exist_ok=True)
+            os.symlink(lake_path, expected_path)
+            
+        return True
+    except Exception as e:
+        print(f"Failed to setup minimal workspace: {e}")
+        return False
 
 def run_basic_arithmetic_test():
-    """Verifies setup with a simple 2+2=4 theorem, dispensing with Mathlib."""
-    if not setup_lean(): 
-        print("Lean setup failed.")
-        return
+    """Verifies setup with 2+2=4 using a simplified inference path."""
+    if not setup_minimal_lean(): return
 
     try:
         os.chdir(SUBMODULE_PATH)
@@ -74,19 +75,18 @@ def run_basic_arithmetic_test():
         import Prover
         import prover.lean.verifier
         
-        # PRESCIND FROM MATHLIB: Use a minimal header that only uses Lean Core
-        # This prevents the 'unknown namespace BigOperators' and massive build times
+        # AGGRESSIVE PATCHING
         MINIMAL_HEADER = "set_option maxHeartbeats 0\n"
         LoT_Prover.Lean4_HEADER = MINIMAL_HEADER
         Prover.Lean4_HEADER = MINIMAL_HEADER
         
-        # Workspace MUST be mathlib4 to get the Lean toolchain, but we won't import Mathlib
-        prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MATHLIB_PATH
+        # Use our clean minimal workspace for verification
+        prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MINIMAL_WORKSPACE
         
         from LoT_Prover import LoT_Prover as LoT_Prover_Class
         from prover.lean.verifier import Lean4ServerScheduler
         
-        # Provide a custom example to avoid loading Mathlib-dependent JSON
+        # Simple example to guide the model without Mathlib
         simple_example = [{
             "Name": "add_zero",
             "NL": "Prove that n + 0 = n.",
@@ -96,16 +96,12 @@ def run_basic_arithmetic_test():
             "Proof": "theorem add_zero (n : Nat) : n + 0 = n := by\n  Nat.add_zero n"
         }]
 
-        print("Initializing LoT_Prover (Prescinding from Mathlib)...")
-        model_id = "RickyDeSkywalker/LoT-Solver" 
+        print("Initializing LoT_Prover (Minimal Mode)...")
+        scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=30, name='verifier')
         
-        scheduler = Lean4ServerScheduler(max_concurrent_requests=1, 
-                                         timeout=30, 
-                                         memory_limit=-1, 
-                                         name='verifier')
-        
-        # example_num=1 tells the model to use our simple core-only example
-        prover_inst = LoT_Prover_Class(model_id, 
+        # We use example_num=1 and standard inference (LongCoT_control=False) 
+        # to avoid the extraction bugs we saw earlier.
+        prover_inst = LoT_Prover_Class("RickyDeSkywalker/LoT-Solver", 
                                       scheduler=scheduler, 
                                       example_list=simple_example, 
                                       example_num=1)
@@ -113,12 +109,14 @@ def run_basic_arithmetic_test():
         Lean_statement = "theorem arithmetic_test : 2 + 2 = 4 := by"
         NL_statement = "Prove that 2 plus 2 equals 4."
         
-        print(f"Running inference for: {Lean_statement}")
+        print(f"Running inference (Standard Inference)...")
+        # LongCoT_control=False is safer for patched headers
         results = prover_inst.LoT_search_single_thm(
             Lean_statement=Lean_statement,
             NL_statement=NL_statement,
-            max_tokens=512,
-            LongCoT_control=True
+            max_tokens=1024,
+            LongCoT_control=False,
+            print_result=True # Let's see what the model actually says
         )
         
         print("\n" + "="*30)
@@ -127,7 +125,7 @@ def run_basic_arithmetic_test():
             print(f"Status: SUCCESS")
             print(f"Proof Found: {results['Proof']}")
         else:
-            print("Status: FAILED (No valid proof found in core Lean)")
+            print("Status: FAILED")
         print("="*30)
         
     except Exception as e:
