@@ -65,16 +65,25 @@ def setup_lean():
                 except FileExistsError:
                     pass
         
-        # Build mathlib REPL if needed (required by the verifier)
-        print("Ensuring mathlib4 REPL is available...")
+        # Initialize Mathlib4
         mathlib_path = os.path.join(SUBMODULE_PATH, "mathlib4")
         if os.path.exists(mathlib_path):
+            print("Initializing mathlib4...")
             try:
-                # We need the 'repl' executable specifically
+                # 1. Ensure the correct toolchain is used
+                subprocess.run([lake_path, "elan", "setup"], cwd=mathlib_path, check=True)
+                
+                # 2. Get precompiled binaries (crucial to avoid 'unknown namespace' errors)
+                print("Fetching Mathlib4 cache (this may take a minute)...")
+                subprocess.run([lake_path, "exe", "cache", "get"], cwd=mathlib_path, check=True)
+                
+                # 3. Build the REPL executable specifically
+                print("Building mathlib4 REPL...")
                 subprocess.run([lake_path, "build", "repl"], cwd=mathlib_path, check=True)
-                print("Mathlib4 REPL built successfully.")
+                
+                print("Mathlib4 environment ready.")
             except Exception as e:
-                print(f"Warning: Failed to build mathlib4 REPL: {e}")
+                print(f"Warning: Failed to fully initialize mathlib4: {e}")
         return True
     return False
 
