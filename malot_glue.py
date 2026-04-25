@@ -78,9 +78,8 @@ def patch_submodule():
             print("Prover.py already patched or code not found.")
 
 def setup_mathlib():
-    """Restores and synchronizes Mathlib environment."""
+    """Restores and synchronizes Mathlib environment with forced cache."""
     print("Setting up Mathlib environment...")
-    
     elan_bin = os.path.expanduser("~/.elan/bin")
     if elan_bin not in os.environ["PATH"]:
         os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
@@ -96,16 +95,17 @@ def setup_mathlib():
     try:
         # Read the required toolchain
         toolchain_file = os.path.join(MATHLIB_PATH, "lean-toolchain")
-        if os.path.exists(toolchain_file):
-            with open(toolchain_file, 'r') as f:
-                toolchain = f.read().strip()
-            print(f"Using toolchain: {toolchain}")
-            # Install if missing (don't fail if already installed)
-            subprocess.run(["elan", "toolchain", "install", toolchain], check=False)
+        with open(toolchain_file, 'r') as f:
+            toolchain = f.read().strip()
+        print(f"Using toolchain: {toolchain}")
         
-        # We skip 'lake update' as it's unreliable in Colab
-        print("Fetching Mathlib cache...")
-        subprocess.run(["elan", "run", toolchain, "lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=False)
+        # Force a refresh of the lake manifest
+        print("Refreshing lake manifest...")
+        subprocess.run(["elan", "run", toolchain, "lake", "update"], cwd=MATHLIB_PATH, check=False)
+        
+        # Use the '!' flag to force cache get even if it thinks it's diverged
+        print("Forcing Mathlib cache download...")
+        subprocess.run(["elan", "run", toolchain, "lake", "exe", "cache", "get!"], cwd=MATHLIB_PATH, check=False)
         
         print("Building Mathlib REPL...")
         subprocess.run(["elan", "run", toolchain, "lake", "build", "repl"], cwd=MATHLIB_PATH, check=True)
@@ -134,6 +134,13 @@ def run_test():
         from LoT_Prover import LoT_Prover
         from prover.lean.verifier import Lean4ServerScheduler
         import prover.lean.verifier
+        import LoT_Prover as LoT_Module
+        import Prover as Prover_Module
+        
+        # AGGRESSIVE PATCHING: Use a more specific header to help Lean find things faster
+        NEW_HEADER = "import Mathlib.Data.Real.Basic\nset_option maxHeartbeats 0\n"
+        LoT_Module.Lean4_HEADER = NEW_HEADER
+        Prover_Module.Lean4_HEADER = NEW_HEADER
         
         prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MATHLIB_PATH
         
@@ -141,7 +148,7 @@ def run_test():
         scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=120, name='verifier')
         prover_inst = LoT_Prover("RickyDeSkywalker/LoT-Solver", scheduler=scheduler)
         
-        # Use a theorem that proves Mathlib is working
+        # Use a more explicit statement to avoid truncation
         Lean_statement = "theorem mathlib_comm (a b : ℝ) : a + b = b + a := by"
         NL_statement = "Prove that for any two real numbers a and b, a + b = b + a."
         
@@ -149,7 +156,7 @@ def run_test():
         results = prover_inst.LoT_search_single_thm(
             Lean_statement=Lean_statement,
             NL_statement=NL_statement,
-            max_tokens=1024,
+            max_tokens=2048, # Increased tokens to avoid truncation
             LongCoT_control=True,
             print_result=True
         )
@@ -158,7 +165,7 @@ def run_test():
         if results:
             print(f"SUCCESS! Proof Found:\n{results['Proof']}")
         else:
-            print("FAILED: Could not find valid proof.")
+            print("FAILED: No proof found. Usually missing oleans.")
         print("="*30)
         
     except Exception as e:
