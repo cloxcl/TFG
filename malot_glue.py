@@ -97,7 +97,15 @@ def run_basic_arithmetic_test():
         # Change directory to the submodule so relative paths inside it work
         os.chdir(SUBMODULE_PATH)
         
-        from LoT_Prover import LoT_Prover
+        import LoT_Prover
+        import Prover
+        
+        # Minimal header for arithmetic test to avoid Mathlib issues
+        MINIMAL_HEADER = "set_option maxHeartbeats 0\n"
+        LoT_Prover.Lean4_HEADER = MINIMAL_HEADER
+        Prover.Lean4_HEADER = MINIMAL_HEADER
+        
+        from LoT_Prover import LoT_Prover as LoT_Prover_Class
         from prover.lean.verifier import Lean4ServerScheduler
         
         print("Initializing LoT_Prover for arithmetic test...")
@@ -108,7 +116,7 @@ def run_basic_arithmetic_test():
                                          memory_limit=-1, 
                                          name='verifier')
         
-        prover = LoT_Prover(model_id, scheduler=scheduler)
+        prover = LoT_Prover_Class(model_id, scheduler=scheduler)
         
         # Simple theorem to prove the setup
         Lean_statement = "theorem arithmetic_test : 2 + 2 = 4 := by"
