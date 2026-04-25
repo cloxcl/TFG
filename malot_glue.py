@@ -20,6 +20,7 @@ import os
 import sys
 import subprocess
 import time
+import shutil
 
 # Add the submodule to the Python path
 SUBMODULE_PATH = os.path.join(os.getcwd(), "LeanOfThought-Official")
@@ -32,20 +33,60 @@ else:
     print(f"Warning: {SUBMODULE_PATH} not found. Make sure you have cloned the submodule.")
 
 def setup_lean():
-    """Basic setup for Lean4 environment in Colab."""
+    """Robust setup for Lean4 environment in Colab."""
     print("Checking for Lean4...")
-    try:
-        subprocess.run(["lean", "--version"], check=True, capture_output=True)
-        print("Lean4 is already installed.")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("Lean4 not found. You might need to install it using elan.")
+    
+    # Try to find lake in the PATH
+    lake_path = shutil.which("lake")
+    
+    if not lake_path:
+        print("Lean4 (lake) not found. Installing via elan...")
+        try:
+            # Install elan
+            subprocess.run("curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y", shell=True, check=True)
+            # Add to PATH for this process
+            elan_bin = os.path.expanduser("~/.elan/bin")
+            os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
+            lake_path = shutil.which("lake")
+        except Exception as e:
+            print(f"Failed to install elan: {e}")
+            return False
+
+    if lake_path:
+        print(f"Lean4 found at: {lake_path}")
+        # Ensure the submodule's expected path exists via symlink
+        expected_path = os.path.expanduser("~/.elan/bin/lake")
+        if lake_path != expected_path:
+            os.makedirs(os.path.dirname(expected_path), exist_ok=True)
+            if not os.path.exists(expected_path):
+                print(f"Creating symlink: {expected_path} -> {lake_path}")
+                try:
+                    os.symlink(lake_path, expected_path)
+                except FileExistsError:
+                    pass
+        
+        # Build mathlib REPL if needed (required by the verifier)
+        print("Ensuring mathlib4 REPL is available...")
+        mathlib_path = os.path.join(SUBMODULE_PATH, "mathlib4")
+        if os.path.exists(mathlib_path):
+            try:
+                # We need the 'repl' executable specifically
+                subprocess.run([lake_path, "build", "repl"], cwd=mathlib_path, check=True)
+                print("Mathlib4 REPL built successfully.")
+            except Exception as e:
+                print(f"Warning: Failed to build mathlib4 REPL: {e}")
+        return True
+    return False
 
 def run_basic_arithmetic_test():
     """Verifies setup with a simple 2+2=4 theorem."""
+    if not setup_lean():
+        print("Aborting test: Lean4 setup failed.")
+        return
+
     try:
         # Change directory to the submodule so relative paths inside it work
         os.chdir(SUBMODULE_PATH)
-        print(f"Changed working directory to {os.getcwd()}")
         
         from LoT_Prover import LoT_Prover
         from prover.lean.verifier import Lean4ServerScheduler
