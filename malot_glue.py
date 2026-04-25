@@ -68,7 +68,8 @@ def run_basic_arithmetic_test():
         results = prover.LoT_search_single_thm(
             Lean_statement=Lean_statement,
             NL_statement=NL_statement,
-            max_tokens=512
+            max_tokens=512,
+            LongCoT_control=True
         )
         print("Arithmetic Test Results:", results)
         
@@ -103,7 +104,8 @@ def run_test():
         results = prover.LoT_search_single_thm(
             Lean_statement=Lean_statement,
             NL_statement=NL_statement,
-            max_tokens=1024
+            max_tokens=1024,
+            LongCoT_control=True
         )
         print("Results:", results)
     except Exception as e:
