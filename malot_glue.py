@@ -23,104 +23,91 @@ import shutil
 
 # Add the submodule to the Python path
 SUBMODULE_PATH = os.path.join(os.getcwd(), "LeanOfThought-Official")
-MINIMAL_WORKSPACE = "/tmp/minimal_lean"
+MATHLIB_PATH = os.path.join(SUBMODULE_PATH, "mathlib4")
 ORIGINAL_CWD = os.getcwd()
 
 if os.path.exists(SUBMODULE_PATH):
     sys.path.append(SUBMODULE_PATH)
     print(f"Added {SUBMODULE_PATH} to sys.path")
 
-def setup_minimal_lean():
-    """Ensures a minimal Lean workspace is ready."""
-    print(f"Setting up minimal Lean workspace at {MINIMAL_WORKSPACE}...")
-    os.makedirs(MINIMAL_WORKSPACE, exist_ok=True)
+def setup_mathlib():
+    """Restores and synchronizes Mathlib environment."""
+    print("Setting up Mathlib environment (this may take a few minutes)...")
     
-    with open(os.path.join(MINIMAL_WORKSPACE, "lakefile.lean"), "w") as f:
-        f.write('import Lake\nopen Lake DSL\npackage minimal where\n@[default_target]\nlean_lib Minimal\n')
-    
-    with open(os.path.join(MINIMAL_WORKSPACE, "lean-toolchain"), "w") as f:
-        f.write('leanprover/lean4:stable\n')
-        
-    with open(os.path.join(MINIMAL_WORKSPACE, "Minimal.lean"), "w") as f:
-        f.write('-- Minimal Lean File\n')
-    
-    # Add elan to PATH
+    # 1. Ensure elan/lake is in PATH
     elan_bin = os.path.expanduser("~/.elan/bin")
     if elan_bin not in os.environ["PATH"]:
         os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
     
+    if not shutil.which("lake"):
+        print("Installing elan...")
+        subprocess.run("curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y", shell=True, check=True)
+
+    if not os.path.exists(MATHLIB_PATH):
+        print(f"Error: Mathlib path not found at {MATHLIB_PATH}. Did you clone with --recurse-submodules?")
+        return False
+
     try:
-        subprocess.run(["lake", "build"], cwd=MINIMAL_WORKSPACE, check=True, capture_output=True)
-        print("Minimal Lean workspace ready.")
+        # 2. Update Mathlib to ensure we can find a valid cache
+        print("Updating Mathlib manifest...")
+        subprocess.run(["lake", "update"], cwd=MATHLIB_PATH, check=True)
         
-        # Link lake for verifier
+        # 3. Fetch precompiled binaries (Crucial for speed!)
+        print("Fetching Mathlib cache...")
+        subprocess.run(["lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=True)
+        
+        # 4. Build the REPL (the bridge for MA-LoT)
+        print("Building Mathlib REPL...")
+        subprocess.run(["lake", "build", "repl"], cwd=MATHLIB_PATH, check=True)
+        
+        # 5. Link lake for the verifier
         lake_path = shutil.which("lake")
         expected_path = os.path.expanduser("~/.elan/bin/lake")
         if lake_path and lake_path != expected_path and not os.path.exists(expected_path):
             os.makedirs(os.path.dirname(expected_path), exist_ok=True)
             os.symlink(lake_path, expected_path)
             
+        print("Mathlib setup complete!")
         return True
     except Exception as e:
-        print(f"Failed to setup minimal workspace: {e}")
+        print(f"Mathlib setup failed: {e}")
         return False
 
-def run_basic_arithmetic_test():
-    """Verifies setup with 2+2=4 using a simplified inference path."""
-    if not setup_minimal_lean(): return
+def run_arithmetic_test():
+    """Verifies setup with 2+2=4 using full Mathlib headers."""
+    if not setup_mathlib(): return
 
     try:
         os.chdir(SUBMODULE_PATH)
-        import LoT_Prover
-        import Prover
+        
+        # We NO LONGER patch headers. We want the real ones back.
+        from LoT_Prover import LoT_Prover
+        from prover.lean.verifier import Lean4ServerScheduler
         import prover.lean.verifier
         
-        # AGGRESSIVE PATCHING
-        MINIMAL_HEADER = "set_option maxHeartbeats 0\n"
-        LoT_Prover.Lean4_HEADER = MINIMAL_HEADER
-        Prover.Lean4_HEADER = MINIMAL_HEADER
+        # Use mathlib4 as the official workspace
+        prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MATHLIB_PATH
         
-        # Use our clean minimal workspace for verification
-        prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MINIMAL_WORKSPACE
+        print("Initializing LoT_Prover with Mathlib...")
+        scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=60, name='verifier')
         
-        from LoT_Prover import LoT_Prover as LoT_Prover_Class
-        from prover.lean.verifier import Lean4ServerScheduler
+        # Note: We let the prover load the real examples from JSON now
+        prover_inst = LoT_Prover("RickyDeSkywalker/LoT-Solver", scheduler=scheduler)
         
-        # Simple example to guide the model without Mathlib
-        simple_example = [{
-            "Name": "add_zero",
-            "NL": "Prove that n + 0 = n.",
-            "Informal_statement": "For any natural number n, n + 0 = n.",
-            "Statement": "theorem add_zero (n : Nat) : n + 0 = n :=",
-            "Commented_proof": "  -- Use the built-in theorem for adding zero\n  Nat.add_zero n",
-            "Proof": "theorem add_zero (n : Nat) : n + 0 = n := by\n  Nat.add_zero n"
-        }]
-
-        print("Initializing LoT_Prover (Minimal Mode)...")
-        scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=30, name='verifier')
+        # Theorem using Real numbers to prove Mathlib is working
+        Lean_statement = "theorem mathlib_test (a b : ℝ) : a + b = b + a := by"
+        NL_statement = "Prove that addition of real numbers is commutative."
         
-        # We use example_num=1 and standard inference (LongCoT_control=False) 
-        # to avoid the extraction bugs we saw earlier.
-        prover_inst = LoT_Prover_Class("RickyDeSkywalker/LoT-Solver", 
-                                      scheduler=scheduler, 
-                                      example_list=simple_example, 
-                                      example_num=1)
-        
-        Lean_statement = "theorem arithmetic_test : 2 + 2 = 4 := by"
-        NL_statement = "Prove that 2 plus 2 equals 4."
-        
-        print(f"Running inference (Standard Inference)...")
-        # LongCoT_control=False is safer for patched headers
+        print(f"Running inference for: {Lean_statement}")
         results = prover_inst.LoT_search_single_thm(
             Lean_statement=Lean_statement,
             NL_statement=NL_statement,
             max_tokens=1024,
-            LongCoT_control=False,
-            print_result=True # Let's see what the model actually says
+            LongCoT_control=True
         )
         
         print("\n" + "="*30)
-        print("ARITHMETIC TEST RESULTS:")
+        print("MATHLIB TEST RESULTS:")
         if results:
             print(f"Status: SUCCESS")
             print(f"Proof Found: {results['Proof']}")
@@ -129,11 +116,11 @@ def run_basic_arithmetic_test():
         print("="*30)
         
     except Exception as e:
-        print(f"Arithmetic test failed: {e}")
+        print(f"Test failed: {e}")
         import traceback
         traceback.print_exc()
     finally:
         os.chdir(ORIGINAL_CWD)
 
 if __name__ == "__main__":
-    run_basic_arithmetic_test()
+    run_arithmetic_test()
