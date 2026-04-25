@@ -1,0 +1,23 @@
+[project]
+name = "tfg-malot"
+version = "0.1.0"
+description = "Glue for MA-LoT on Google Colab"
+dependencies = [
+    "torch",
+    "vllm",
+    "transformers",
+    "datasets",
+    "pyyaml",
+    "tqdm",
+    "easydict",
+    "aiohttp",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "numpy",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+]

@@ -1,0 +1,3 @@
+[submodule "LeanOfThought-Official"]
+	path = LeanOfThought-Official
+	url = https://github.com/RickySkywalker/LeanOfThought-Official.git
