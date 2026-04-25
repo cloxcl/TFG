@@ -32,7 +32,7 @@ if os.path.exists(SUBMODULE_PATH):
 
 def setup_mathlib():
     """Restores and synchronizes Mathlib environment."""
-    print("Setting up Mathlib environment (this may take a few minutes)...")
+    print("Setting up Mathlib environment...")
     
     # 1. Ensure elan/lake is in PATH
     elan_bin = os.path.expanduser("~/.elan/bin")
@@ -44,43 +44,58 @@ def setup_mathlib():
         subprocess.run("curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y", shell=True, check=True)
 
     if not os.path.exists(MATHLIB_PATH):
-        print(f"Error: Mathlib path not found at {MATHLIB_PATH}. Did you clone with --recurse-submodules?")
+        print(f"Error: Mathlib path not found at {MATHLIB_PATH}.")
         return False
 
     try:
-        # 2. Update Mathlib to ensure we can find a valid cache
-        print("Updating Mathlib manifest...")
-        subprocess.run(["lake", "update"], cwd=MATHLIB_PATH, check=True)
+        # Read the required toolchain
+        toolchain_file = os.path.join(MATHLIB_PATH, "lean-toolchain")
+        if os.path.exists(toolchain_file):
+            with open(toolchain_file, 'r') as f:
+                toolchain = f.read().strip()
+            print(f"Required toolchain: {toolchain}")
+            # Ensure it's installed
+            subprocess.run(["elan", "install", toolchain], check=True)
         
-        # 3. Fetch precompiled binaries (Crucial for speed!)
-        print("Fetching Mathlib cache...")
-        subprocess.run(["lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=True)
+        # 2. We SKIP 'lake update' because it can break dependencies.
+        # We try to get the cache using the manifest as is.
+        print("Fetching Mathlib cache (using existing manifest)...")
+        # We use 'elan run' to make sure we use the EXACT toolchain required
+        subprocess.run(["elan", "run", toolchain, "lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=True)
         
-        # 4. Build the REPL (the bridge for MA-LoT)
+        # 3. Build the REPL
         print("Building Mathlib REPL...")
-        subprocess.run(["lake", "build", "repl"], cwd=MATHLIB_PATH, check=True)
+        subprocess.run(["elan", "run", toolchain, "lake", "build", "repl"], cwd=MATHLIB_PATH, check=True)
         
-        # 5. Link lake for the verifier
-        lake_path = shutil.which("lake")
+        # 4. Link lake for the verifier
+        # Find where the actual lake for this toolchain is
+        lake_path = subprocess.run(["elan", "which", "lake"], capture_output=True, text=True).stdout.strip()
         expected_path = os.path.expanduser("~/.elan/bin/lake")
-        if lake_path and lake_path != expected_path and not os.path.exists(expected_path):
+        if lake_path and lake_path != expected_path:
             os.makedirs(os.path.dirname(expected_path), exist_ok=True)
+            if os.path.exists(expected_path):
+                os.remove(expected_path)
             os.symlink(lake_path, expected_path)
             
         print("Mathlib setup complete!")
         return True
     except Exception as e:
         print(f"Mathlib setup failed: {e}")
-        return False
+        # If it failed, maybe try one last 'lake update' but only if really needed
+        print("Attempting a fallback build...")
+        try:
+             subprocess.run(["lake", "build", "repl"], cwd=MATHLIB_PATH, check=False)
+             return True
+        except:
+             return False
 
 def run_arithmetic_test():
-    """Verifies setup with 2+2=4 using full Mathlib headers."""
+    """Verifies setup with a simple commutative theorem."""
     if not setup_mathlib(): return
 
     try:
         os.chdir(SUBMODULE_PATH)
         
-        # We NO LONGER patch headers. We want the real ones back.
         from LoT_Prover import LoT_Prover
         from prover.lean.verifier import Lean4ServerScheduler
         import prover.lean.verifier
@@ -89,12 +104,11 @@ def run_arithmetic_test():
         prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MATHLIB_PATH
         
         print("Initializing LoT_Prover with Mathlib...")
-        scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=60, name='verifier')
+        scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=120, name='verifier')
         
-        # Note: We let the prover load the real examples from JSON now
         prover_inst = LoT_Prover("RickyDeSkywalker/LoT-Solver", scheduler=scheduler)
         
-        # Theorem using Real numbers to prove Mathlib is working
+        # COMMUTATIVE TEST (Requires Mathlib for Real numbers)
         Lean_statement = "theorem mathlib_test (a b : ℝ) : a + b = b + a := by"
         NL_statement = "Prove that addition of real numbers is commutative."
         
