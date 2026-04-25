@@ -15,9 +15,10 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "numpy",
+    "pytz",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest",
 ]
