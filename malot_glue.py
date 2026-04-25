@@ -36,6 +36,11 @@ def setup_lean():
     """Robust setup for Lean4 environment in Colab."""
     print("Checking for Lean4...")
     
+    # Ensure elan bin is in PATH
+    elan_bin = os.path.expanduser("~/.elan/bin")
+    if elan_bin not in os.environ["PATH"]:
+        os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
+
     # Try to find lake in the PATH
     lake_path = shutil.which("lake")
     
@@ -44,9 +49,6 @@ def setup_lean():
         try:
             # Install elan
             subprocess.run("curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y", shell=True, check=True)
-            # Add to PATH for this process
-            elan_bin = os.path.expanduser("~/.elan/bin")
-            os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
             lake_path = shutil.which("lake")
         except Exception as e:
             print(f"Failed to install elan: {e}")
@@ -54,7 +56,7 @@ def setup_lean():
 
     if lake_path:
         print(f"Lean4 found at: {lake_path}")
-        # Ensure the submodule's expected path exists via symlink
+        # Ensure the submodule's expected path exists via symlink for the verifier
         expected_path = os.path.expanduser("~/.elan/bin/lake")
         if lake_path != expected_path:
             os.makedirs(os.path.dirname(expected_path), exist_ok=True)
@@ -70,14 +72,12 @@ def setup_lean():
         if os.path.exists(mathlib_path):
             print("Initializing mathlib4...")
             try:
-                # 1. Ensure the correct toolchain is used
-                subprocess.run([lake_path, "elan", "setup"], cwd=mathlib_path, check=True)
-                
-                # 2. Get precompiled binaries (crucial to avoid 'unknown namespace' errors)
+                # 1. Get precompiled binaries (crucial to avoid 'unknown namespace' errors)
+                # This will automatically use the correct toolchain via elan
                 print("Fetching Mathlib4 cache (this may take a minute)...")
                 subprocess.run([lake_path, "exe", "cache", "get"], cwd=mathlib_path, check=True)
                 
-                # 3. Build the REPL executable specifically
+                # 2. Build the REPL executable specifically
                 print("Building mathlib4 REPL...")
                 subprocess.run([lake_path, "build", "repl"], cwd=mathlib_path, check=True)
                 
