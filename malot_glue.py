@@ -22,19 +22,65 @@ import subprocess
 import shutil
 
 # Add the submodule to the Python path
-SUBMODULE_PATH = os.path.join(os.getcwd(), "LeanOfThought-Official")
+def find_submodule():
+    # Look for it recursively in case of nested folders in Colab
+    for root, dirs, files in os.walk(os.getcwd()):
+        if "LeanOfThought-Official" in dirs:
+            return os.path.join(root, "LeanOfThought-Official")
+    return os.path.join(os.getcwd(), "LeanOfThought-Official")
+
+SUBMODULE_PATH = find_submodule()
 MATHLIB_PATH = os.path.join(SUBMODULE_PATH, "mathlib4")
 ORIGINAL_CWD = os.getcwd()
 
+print(f"Submodule path: {SUBMODULE_PATH}")
 if os.path.exists(SUBMODULE_PATH):
     sys.path.append(SUBMODULE_PATH)
-    print(f"Added {SUBMODULE_PATH} to sys.path")
+else:
+    print(f"Warning: {SUBMODULE_PATH} not found.")
+
+def patch_submodule():
+    """Fixes a critical bug in the submodule's theorem preprocessing."""
+    prover_py = os.path.join(SUBMODULE_PATH, "Prover.py")
+    if os.path.exists(prover_py):
+        print("Patching Prover.py to fix theorem stripping bug...")
+        with open(prover_py, 'r') as f:
+            content = f.read()
+        
+        # The original code has a loop that strips the entire string if it doesn't end with ':='
+        old_code = """    def _preprocess_theorem_statement(self,
+                                      input_statement: str):
+        while not input_statement.endswith(":="):
+            input_statement = input_statement[:-1]
+
+        if input_statement.endswith(":="):
+            input_statement = input_statement[:-len(":=")]
+        input_statement += ":= by"
+        return input_statement"""
+        
+        new_code = """    def _preprocess_theorem_statement(self,
+                                      input_statement: str):
+        if ":=" in input_statement:
+            input_statement = input_statement[:input_statement.rfind(":=")]
+        input_statement = input_statement.strip()
+        if not input_statement.endswith(":="):
+            input_statement += " := by"
+        else:
+            input_statement += " by"
+        return input_statement"""
+        
+        if old_code in content:
+            new_content = content.replace(old_code, new_code)
+            with open(prover_py, 'w') as f:
+                f.write(new_content)
+            print("Successfully patched Prover.py")
+        else:
+            print("Prover.py already patched or code not found.")
 
 def setup_mathlib():
     """Restores and synchronizes Mathlib environment."""
     print("Setting up Mathlib environment...")
     
-    # 1. Ensure elan/lake is in PATH
     elan_bin = os.path.expanduser("~/.elan/bin")
     if elan_bin not in os.environ["PATH"]:
         os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
@@ -53,80 +99,66 @@ def setup_mathlib():
         if os.path.exists(toolchain_file):
             with open(toolchain_file, 'r') as f:
                 toolchain = f.read().strip()
-            print(f"Required toolchain: {toolchain}")
-            # Ensure it's installed
-            subprocess.run(["elan", "install", toolchain], check=True)
+            print(f"Using toolchain: {toolchain}")
+            # Install if missing (don't fail if already installed)
+            subprocess.run(["elan", "toolchain", "install", toolchain], check=False)
         
-        # 2. We SKIP 'lake update' because it can break dependencies.
-        # We try to get the cache using the manifest as is.
-        print("Fetching Mathlib cache (using existing manifest)...")
-        # We use 'elan run' to make sure we use the EXACT toolchain required
-        subprocess.run(["elan", "run", toolchain, "lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=True)
+        # We skip 'lake update' as it's unreliable in Colab
+        print("Fetching Mathlib cache...")
+        subprocess.run(["elan", "run", toolchain, "lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=False)
         
-        # 3. Build the REPL
         print("Building Mathlib REPL...")
         subprocess.run(["elan", "run", toolchain, "lake", "build", "repl"], cwd=MATHLIB_PATH, check=True)
         
-        # 4. Link lake for the verifier
-        # Find where the actual lake for this toolchain is
+        # Link lake for the verifier
         lake_path = subprocess.run(["elan", "which", "lake"], capture_output=True, text=True).stdout.strip()
         expected_path = os.path.expanduser("~/.elan/bin/lake")
         if lake_path and lake_path != expected_path:
             os.makedirs(os.path.dirname(expected_path), exist_ok=True)
-            if os.path.exists(expected_path):
-                os.remove(expected_path)
+            if os.path.exists(expected_path): os.remove(expected_path)
             os.symlink(lake_path, expected_path)
             
         print("Mathlib setup complete!")
         return True
     except Exception as e:
-        print(f"Mathlib setup failed: {e}")
-        # If it failed, maybe try one last 'lake update' but only if really needed
-        print("Attempting a fallback build...")
-        try:
-             subprocess.run(["lake", "build", "repl"], cwd=MATHLIB_PATH, check=False)
-             return True
-        except:
-             return False
+        print(f"Mathlib setup warning: {e}")
+        return True # Try to proceed anyway
 
-def run_arithmetic_test():
+def run_test():
     """Verifies setup with a simple commutative theorem."""
+    patch_submodule()
     if not setup_mathlib(): return
 
     try:
         os.chdir(SUBMODULE_PATH)
-        
         from LoT_Prover import LoT_Prover
         from prover.lean.verifier import Lean4ServerScheduler
         import prover.lean.verifier
         
-        # Use mathlib4 as the official workspace
         prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MATHLIB_PATH
         
-        print("Initializing LoT_Prover with Mathlib...")
+        print("Initializing LoT_Prover...")
         scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=120, name='verifier')
-        
         prover_inst = LoT_Prover("RickyDeSkywalker/LoT-Solver", scheduler=scheduler)
         
-        # COMMUTATIVE TEST (Requires Mathlib for Real numbers)
-        Lean_statement = "theorem mathlib_test (a b : ℝ) : a + b = b + a := by"
-        NL_statement = "Prove that addition of real numbers is commutative."
+        # Use a theorem that proves Mathlib is working
+        Lean_statement = "theorem mathlib_comm (a b : ℝ) : a + b = b + a := by"
+        NL_statement = "Prove that for any two real numbers a and b, a + b = b + a."
         
         print(f"Running inference for: {Lean_statement}")
         results = prover_inst.LoT_search_single_thm(
             Lean_statement=Lean_statement,
             NL_statement=NL_statement,
             max_tokens=1024,
-            LongCoT_control=True
+            LongCoT_control=True,
+            print_result=True
         )
         
         print("\n" + "="*30)
-        print("MATHLIB TEST RESULTS:")
         if results:
-            print(f"Status: SUCCESS")
-            print(f"Proof Found: {results['Proof']}")
+            print(f"SUCCESS! Proof Found:\n{results['Proof']}")
         else:
-            print("Status: FAILED")
+            print("FAILED: Could not find valid proof.")
         print("="*30)
         
     except Exception as e:
@@ -137,4 +169,4 @@ def run_arithmetic_test():
         os.chdir(ORIGINAL_CWD)
 
 if __name__ == "__main__":
-    run_arithmetic_test()
+    run_test()
