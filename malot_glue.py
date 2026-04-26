@@ -22,6 +22,7 @@ import subprocess
 import shutil
 import torch
 import time
+import re
 
 # FORCE vLLM to use CUDA
 os.environ["VLLM_TARGET_DEVICE"] = "cuda"
@@ -55,7 +56,35 @@ if SUBMODULE_PATH and os.path.exists(SUBMODULE_PATH):
     if SUBMODULE_PATH not in sys.path:
         sys.path.insert(0, SUBMODULE_PATH)
 
+def extract_from_lean_file(file_path):
+    """Extracts theorem statement and NL description from a .lean file."""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+        
+    with open(file_path, 'r') as f:
+        content = f.read()
+
+    # 1. Try to find the NL description in a docstring /-- ... -/
+    nl_match = re.search(r'/--\s*(.*?)\s*-/', content, re.DOTALL)
+    nl_statement = nl_match.group(1).strip() if nl_match else f"Prove the theorem defined in {os.path.basename(file_path)}"
+
+    # 2. Extract the theorem statement (from 'theorem' up to ':=')
+    matches = list(re.finditer(r'(theorem|lemma)\s+[\s\S]*?:=', content))
+    if matches:
+        fl_statement = matches[-1].group(0).strip()
+        # Ensure it ends with 'by' for the prover to complete it
+        if not fl_statement.endswith("by"):
+            fl_statement += " by"
+    else:
+        # Fallback logic
+        fl_statement = content.strip()
+        if ":=" in fl_statement and not fl_statement.endswith("by"):
+            fl_statement = fl_statement.split(":=")[0] + ":= by"
+
+    return fl_statement, nl_statement
+
 def repair_mathlib():
+    # ... rest of the function (lines 53-102) ...
     """Resets mathlib to a clean state and builds the REPL."""
     print("\n--- REPAIRING MATHLIB ---")
     
@@ -82,7 +111,6 @@ def repair_mathlib():
 
         # 3. Get binaries (even if partial)
         print("Fetching binaries (cache get)...")
-        # Use yes to bypass any prompts and a timeout to prevent hanging
         try:
             subprocess.run("yes | lake exe cache get", shell=True, cwd=MATHLIB_PATH, check=False, timeout=600)
         except subprocess.TimeoutExpired:
@@ -112,40 +140,65 @@ def patch_submodule():
     """Applies critical fixes to the research code."""
     print("\n--- PATCHING SUBMODULE ---")
     
-    # 1. Fix aggressive stripping bug and newline issue in Prover.py
+    # 1. Prover.py fixes
     prover_py = os.path.join(SUBMODULE_PATH, "Prover.py")
     if os.path.exists(prover_py):
         with open(prover_py, 'r') as f:
             content = f.read()
         
-        old_code = "while not input_statement.endswith(\":=\"):"
-        if old_code in content:
-            new_code = "if \":=\" in input_statement: input_statement = input_statement[:input_statement.rfind(\":=\")];\n        while False:"
-            content = content.replace(old_code, new_code)
-            
-        old_newline_code = "input_statement += \":= by\"\n        return input_statement"
-        if old_newline_code in content:
-            new_newline_code = "input_statement += \":= by\\n\"\n        return input_statement"
-            content = content.replace(old_newline_code, new_newline_code)
-            
+        # Fix aggressive stripping bug
+        content = content.replace(
+            "while not input_statement.endswith(\":=\"):",
+            "if \":=\" in input_statement: input_statement = input_statement[:input_statement.rfind(\":=\")];\n        while False:"
+        )
+        
+        # Add newline after 'by' for better model guidance
+        content = content.replace(
+            "input_statement += \":= by\"",
+            "input_statement += \":= by\\n\""
+        )
+        
+        # Fix extraction logic to return FIRST block (your proof) instead of LAST (hallucinations)
+        # And handle same-line backticks
+        old_extract_end = 'return code_blocks[-1]'
+        new_extract_end = 'return code_blocks[0]'
+        content = content.replace(old_extract_end, new_extract_end)
+        
+        old_extract_mid = 'elif "```" in line.strip() and inside_code_block:'
+        new_extract_mid = 'elif "```" in line and inside_code_block:\n                if line.strip() != "```": current_block.append(line.split("```")[0])'
+        content = content.replace(old_extract_mid, new_extract_mid)
+        
+        # Add stop string to prevent hallucinations in stage 2
+        content = content.replace(
+            "postCoT_sampling_para = SamplingParams(",
+            "postCoT_sampling_para = SamplingParams(\n            stop=[\"```\"],"
+        )
+        
         with open(prover_py, 'w') as f:
             f.write(content)
         print("Patched Prover.py")
 
-    # 2. Fix model ID check in LoT_Prover.py to support official DeepSeek models
+    # 2. LoT_Prover.py fixes
     lot_prover_py = os.path.join(SUBMODULE_PATH, "LoT_Prover.py")
     if os.path.exists(lot_prover_py):
         with open(lot_prover_py, 'r') as f:
             content = f.read()
         
-        # Expand check to allow official names
-        old_check = "if \"lot-solver\" in self.model_id.lower():"
-        new_check = "if \"lot-solver\" in self.model_id.lower() or \"prover-v1.5\" in self.model_id.lower():"
-        if old_check in content:
-            content = content.replace(old_check, new_check)
-            with open(lot_prover_py, 'w') as f:
-                f.write(content)
-            print("Patched LoT_Prover.py")
+        # Fix model ID check
+        content = content.replace(
+            "if \"lot-solver\" in self.model_id.lower():",
+            "if \"lot-solver\" in self.model_id.lower() or \"prover-v1.5\" in self.model_id.lower():"
+        )
+        
+        # Fix indexing bug when filtering proofs
+        content = content.replace(
+            "eval_results = self.run_lean_verification(thm_prove_ls)",
+            "eval_results = self.run_lean_verification(processed_thm_prove_ls)"
+        )
+        
+        with open(lot_prover_py, 'w') as f:
+            f.write(content)
+        print("Patched LoT_Prover.py")
 
 def run_test(Lean_statement, NL_statement):
     """Runs the proof pipeline."""
@@ -167,14 +220,13 @@ def run_test(Lean_statement, NL_statement):
         # Set workspace
         prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MATHLIB_PATH
         
-        # Use a minimal header to avoid "unknown namespace" errors if Mathlib is partially built
+        # Header override
         HEADER = "import Mathlib\nset_option maxHeartbeats 0\n"
         
         import LoT_Prover as LoT_Module
         import Prover as Prover_Module
         import Corrector as Corrector_Module
         
-        # Correctly override the module-level globals
         LoT_Module.Lean4_HEADER = HEADER
         Prover_Module.Lean4_HEADER = HEADER
         Corrector_Module.Lean4_HEADER = HEADER
@@ -183,7 +235,6 @@ def run_test(Lean_statement, NL_statement):
         print(f"Theorem: {Lean_statement}")
         
         scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=300, name='verifier')
-        # Updated to the requested model
         prover_inst = LoT_Prover("deepseek-ai/DeepSeek-Prover-V1.5-RL", scheduler=scheduler)
         
         results = prover_inst.LoT_search_single_thm(
@@ -211,12 +262,20 @@ def run_test(Lean_statement, NL_statement):
 
 if __name__ == "__main__":
     import sys
-    test_type = sys.argv[1] if len(sys.argv) > 1 else "default"
+    arg = sys.argv[1] if len(sys.argv) > 1 else "default"
     
-    if test_type == "test-arithmetic":
+    if arg.endswith(".lean") or os.path.exists(arg):
+        print(f"Reading from file: {arg}")
+        try:
+            Lean_statement, NL_statement = extract_from_lean_file(arg)
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            sys.exit(1)
+    elif arg in ["test-arithmetic", "test_arithmetic"]:
         Lean_statement = "theorem arithmetic_test : 2 + 2 = 4 := by"
         NL_statement = "Prove that 2 + 2 = 4."
     else:
+        # Default behavior: mathlib comm test
         Lean_statement = "theorem mathlib_comm (a b : ℝ) : a + b = b + a := by"
         NL_statement = "Prove that for any two real numbers a and b, a + b = b + a."
         
