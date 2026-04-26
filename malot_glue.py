@@ -60,8 +60,10 @@ def repair_mathlib():
     
     elan_bin = os.path.expanduser("~/.elan/bin")
     os.environ["PATH"] = elan_bin + os.pathsep + os.environ["PATH"]
+    os.environ["ELAN_HOME"] = os.path.expanduser("~/.elan")
     
     if not shutil.which("lake"):
+        print("Installing elan...")
         subprocess.run("curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y", shell=True, check=True)
 
     try:
@@ -71,18 +73,23 @@ def repair_mathlib():
         
         # 2. Setup Toolchain
         toolchain_file = os.path.join(MATHLIB_PATH, "lean-toolchain")
-        with open(toolchain_file, 'r') as f:
-            toolchain = f.read().strip()
-        print(f"Forcing toolchain: {toolchain}")
-        subprocess.run(["elan", "override", "set", toolchain], cwd=MATHLIB_PATH, check=True)
+        if os.path.exists(toolchain_file):
+            with open(toolchain_file, 'r') as f:
+                toolchain = f.read().strip()
+            print(f"Forcing toolchain: {toolchain}")
+            subprocess.run(["elan", "override", "set", toolchain], cwd=MATHLIB_PATH, check=True)
 
         # 3. Get binaries (even if partial)
         print("Fetching binaries (cache get)...")
-        subprocess.run(["lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=False)
+        # Use yes to bypass any prompts and a timeout to prevent hanging
+        try:
+            subprocess.run("yes | lake exe cache get", shell=True, cwd=MATHLIB_PATH, check=False, timeout=600)
+        except subprocess.TimeoutExpired:
+            print("Cache fetch timed out, proceeding anyway...")
         
         # 4. Build REPL
         print("Building REPL bridge...")
-        subprocess.run(["lake", "build", "repl"], cwd=MATHLIB_PATH, check=False)
+        subprocess.run("yes | lake build REPL", shell=True, cwd=MATHLIB_PATH, check=False, timeout=300)
         
         # 5. Symlink for verifier
         lake_path = subprocess.run(["elan", "which", "lake"], capture_output=True, text=True).stdout.strip()
@@ -90,7 +97,10 @@ def repair_mathlib():
         if lake_path and lake_path != target:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             if os.path.exists(target): os.remove(target)
-            os.symlink(lake_path, target)
+            try:
+                os.symlink(lake_path, target)
+            except OSError:
+                print("Failed to create lake symlink")
             
         return True
     except Exception as e:
@@ -114,7 +124,7 @@ def patch_submodule():
                 f.write(content)
             print("Patched Prover.py (Fixed stripping bug)")
 
-def run_test():
+def run_test(Lean_statement, NL_statement):
     """Runs the proof pipeline."""
     if not torch.cuda.is_available():
         print("Aborting: GPU required for vLLM.")
@@ -144,9 +154,6 @@ def run_test():
         scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=300, name='verifier')
         prover_inst = LoT_Prover("RickyDeSkywalker/LoT-Solver", scheduler=scheduler)
         
-        Lean_statement = "theorem mathlib_comm (a b : ℝ) : a + b = b + a := by"
-        NL_statement = "Prove that for any two real numbers a and b, a + b = b + a."
-        
         results = prover_inst.LoT_search_single_thm(
             Lean_statement=Lean_statement,
             NL_statement=NL_statement,
@@ -170,4 +177,14 @@ def run_test():
         os.chdir("/content")
 
 if __name__ == "__main__":
-    run_test()
+    import sys
+    test_type = sys.argv[1] if len(sys.argv) > 1 else "default"
+    
+    if test_type == "test-arithmetic":
+        Lean_statement = "theorem arithmetic_test : 2 + 2 = 4 := by"
+        NL_statement = "Prove that 2 + 2 = 4."
+    else:
+        Lean_statement = "theorem mathlib_comm (a b : ℝ) : a + b = b + a := by"
+        NL_statement = "Prove that for any two real numbers a and b, a + b = b + a."
+        
+    run_test(Lean_statement, NL_statement)
