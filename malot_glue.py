@@ -22,6 +22,9 @@ import subprocess
 import shutil
 import torch
 
+# FORCE vLLM to use CUDA
+os.environ["VLLM_TARGET_DEVICE"] = "cuda"
+
 def find_submodule():
     """Finds the LeanOfThought-Official directory anywhere in /content."""
     for root, dirs, files in os.walk('/content'):
@@ -33,18 +36,23 @@ SUBMODULE_PATH = find_submodule()
 MATHLIB_PATH = os.path.join(SUBMODULE_PATH, "mathlib4")
 ORIGINAL_CWD = os.getcwd()
 
-print(f"--- ENVIRONMENT CHECK ---")
-print(f"CUDA Available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
+print(f"--- HARDWARE CHECK ---")
+cuda_available = torch.cuda.is_available()
+print(f"CUDA Available: {cuda_available}")
+if cuda_available:
+    print(f"GPU Name: {torch.cuda.get_device_name(0)}")
 else:
-    print("!!! WARNING: No GPU detected. vLLM will fail. Switch to a GPU runtime. !!!")
+    print("!!! ERROR: NO GPU DETECTED !!!")
+    print("Go to Runtime > Change runtime type and select 'T4 GPU'.")
 
+print(f"\n--- PATH CHECK ---")
 print(f"Submodule: {SUBMODULE_PATH}")
+print(f"Mathlib: {MATHLIB_PATH}")
 
 # Force path addition
-if SUBMODULE_PATH not in sys.path:
-    sys.path.insert(0, SUBMODULE_PATH)
+if SUBMODULE_PATH and os.path.exists(SUBMODULE_PATH):
+    if SUBMODULE_PATH not in sys.path:
+        sys.path.insert(0, SUBMODULE_PATH)
 
 def repair_mathlib():
     """Resets mathlib to a clean state and builds the REPL."""
@@ -58,18 +66,18 @@ def repair_mathlib():
 
     try:
         # 1. Reset manifest
-        print("Ensuring clean manifest...")
+        print("Restoring original manifest...")
         subprocess.run(["git", "checkout", "lake-manifest.json"], cwd=MATHLIB_PATH, check=False)
         
         # 2. Setup Toolchain
         toolchain_file = os.path.join(MATHLIB_PATH, "lean-toolchain")
         with open(toolchain_file, 'r') as f:
             toolchain = f.read().strip()
-        print(f"Using toolchain: {toolchain}")
+        print(f"Forcing toolchain: {toolchain}")
         subprocess.run(["elan", "override", "set", toolchain], cwd=MATHLIB_PATH, check=True)
 
         # 3. Get binaries (even if partial)
-        print("Fetching binaries...")
+        print("Fetching binaries (cache get)...")
         subprocess.run(["lake", "exe", "cache", "get"], cwd=MATHLIB_PATH, check=False)
         
         # 4. Build REPL
@@ -78,7 +86,7 @@ def repair_mathlib():
         
         # 5. Symlink for verifier
         lake_path = subprocess.run(["elan", "which", "lake"], capture_output=True, text=True).stdout.strip()
-        target = os.path.join(elan_bin, "lake")
+        target = os.path.expanduser("~/.elan/bin/lake")
         if lake_path and lake_path != target:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             if os.path.exists(target): os.remove(target)
@@ -104,7 +112,7 @@ def patch_submodule():
             content = content.replace(old_code, new_code)
             with open(prover_py, 'w') as f:
                 f.write(content)
-            print("Patched Prover.py")
+            print("Patched Prover.py (Fixed stripping bug)")
 
 def run_test():
     """Runs the proof pipeline."""
