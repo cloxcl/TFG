@@ -21,6 +21,7 @@ import sys
 import subprocess
 import shutil
 import torch
+import time
 
 # FORCE vLLM to use CUDA
 os.environ["VLLM_TARGET_DEVICE"] = "cuda"
@@ -110,19 +111,41 @@ def repair_mathlib():
 def patch_submodule():
     """Applies critical fixes to the research code."""
     print("\n--- PATCHING SUBMODULE ---")
+    
+    # 1. Fix aggressive stripping bug and newline issue in Prover.py
     prover_py = os.path.join(SUBMODULE_PATH, "Prover.py")
     if os.path.exists(prover_py):
         with open(prover_py, 'r') as f:
             content = f.read()
         
-        # Fix the aggressive stripping bug
         old_code = "while not input_statement.endswith(\":=\"):"
         if old_code in content:
             new_code = "if \":=\" in input_statement: input_statement = input_statement[:input_statement.rfind(\":=\")];\n        while False:"
             content = content.replace(old_code, new_code)
-            with open(prover_py, 'w') as f:
+            
+        old_newline_code = "input_statement += \":= by\"\n        return input_statement"
+        if old_newline_code in content:
+            new_newline_code = "input_statement += \":= by\\n\"\n        return input_statement"
+            content = content.replace(old_newline_code, new_newline_code)
+            
+        with open(prover_py, 'w') as f:
+            f.write(content)
+        print("Patched Prover.py")
+
+    # 2. Fix model ID check in LoT_Prover.py to support official DeepSeek models
+    lot_prover_py = os.path.join(SUBMODULE_PATH, "LoT_Prover.py")
+    if os.path.exists(lot_prover_py):
+        with open(lot_prover_py, 'r') as f:
+            content = f.read()
+        
+        # Expand check to allow official names
+        old_check = "if \"lot-solver\" in self.model_id.lower():"
+        new_check = "if \"lot-solver\" in self.model_id.lower() or \"prover-v1.5\" in self.model_id.lower():"
+        if old_check in content:
+            content = content.replace(old_check, new_check)
+            with open(lot_prover_py, 'w') as f:
                 f.write(content)
-            print("Patched Prover.py (Fixed stripping bug)")
+            print("Patched LoT_Prover.py")
 
 def run_test(Lean_statement, NL_statement):
     """Runs the proof pipeline."""
@@ -136,23 +159,32 @@ def run_test(Lean_statement, NL_statement):
     try:
         os.chdir(SUBMODULE_PATH)
         
-        # Import after path fix
+        print("Loading LoT modules...")
         from LoT_Prover import LoT_Prover
         from prover.lean.verifier import Lean4ServerScheduler
         import prover.lean.verifier
         
-        # Set workspace and specific header
+        # Set workspace
         prover.lean.verifier.DEFAULT_LEAN_WORKSPACE = MATHLIB_PATH
-        HEADER = "import Mathlib.Data.Real.Basic\nset_option maxHeartbeats 0\n"
+        
+        # Use a minimal header to avoid "unknown namespace" errors if Mathlib is partially built
+        HEADER = "import Mathlib\nset_option maxHeartbeats 0\n"
         
         import LoT_Prover as LoT_Module
         import Prover as Prover_Module
+        import Corrector as Corrector_Module
+        
+        # Correctly override the module-level globals
         LoT_Module.Lean4_HEADER = HEADER
-        Prover_Module.Prove_writer.Lean4_HEADER = HEADER
+        Prover_Module.Lean4_HEADER = HEADER
+        Corrector_Module.Lean4_HEADER = HEADER
         
         print("\n--- STARTING INFERENCE ---")
+        print(f"Theorem: {Lean_statement}")
+        
         scheduler = Lean4ServerScheduler(max_concurrent_requests=1, timeout=300, name='verifier')
-        prover_inst = LoT_Prover("RickyDeSkywalker/LoT-Solver", scheduler=scheduler)
+        # Updated to the requested model
+        prover_inst = LoT_Prover("deepseek-ai/DeepSeek-Prover-V1.5-RL", scheduler=scheduler)
         
         results = prover_inst.LoT_search_single_thm(
             Lean_statement=Lean_statement,
@@ -170,11 +202,12 @@ def run_test(Lean_statement, NL_statement):
         print("="*40)
         
     except Exception as e:
-        print(f"Execution failed: {e}")
+        print(f"\n!!! EXECUTION FAILED !!!")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        os.chdir("/content")
+        os.chdir(ORIGINAL_CWD)
 
 if __name__ == "__main__":
     import sys
@@ -187,4 +220,9 @@ if __name__ == "__main__":
         Lean_statement = "theorem mathlib_comm (a b : ℝ) : a + b = b + a := by"
         NL_statement = "Prove that for any two real numbers a and b, a + b = b + a."
         
-    run_test(Lean_statement, NL_statement)
+    try:
+        run_test(Lean_statement, NL_statement)
+    except KeyboardInterrupt:
+        print("\nInterrupted by user.")
+    except Exception as e:
+        print(f"Fatal error: {e}")
